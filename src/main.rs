@@ -1,12 +1,11 @@
 use clap::{Parser, Subcommand};
 use std::env;
 use std::fs;
-use std::io;
-use std::io::Write;
+use std::process::exit;
+use std::process::Stdio;
 
-/// Simple program to greet a person
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command()]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -14,20 +13,26 @@ struct Args {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    Install { packages: Vec<String> },
+    Install {
+        packages: Vec<String>,
+        #[arg(short, long)]
+        yes: bool,
+    },
     Update,
 }
 
 fn main() {
     let args = Args::parse();
 
-    let apt_option = [
+    let mut apt_option = vec![
         "-o",
         "debug::nolocking=true",
         "-o",
         "dir::cache=/tmp/apt/cache",
         "-o",
         "dir::state=/tmp/apt/state",
+        "-o",
+        "dir::cache::archives=/tmp/apt/cache/archives",
     ];
 
     let _ = fs::remove_dir_all("/tmp/apt/cache/");
@@ -37,44 +42,56 @@ fn main() {
     fs::create_dir_all(home.clone()).expect("error creating cache");
 
     match args.command {
-        Command::Install { packages } => {
-            let mut cmd = std::process::Command::new("apt-get");
-            cmd.arg("install");
-            cmd.arg("--reinstall");
-            cmd.args(apt_option);
-            cmd.arg("-d");
-            cmd.arg("-y");
-            cmd.args(packages);
-            println!("{:?}", cmd);
-            let output = cmd.output().expect("failed to execute process");
-            io::stdout().write_all(&output.stdout).unwrap();
-            io::stderr().write_all(&output.stderr).unwrap();
-            if output.status.success() {
-                fs::read_dir("/tmp/apt/cache/archives/")
-                    .unwrap()
+        Command::Install { packages, yes } => {
+            if yes {
+                apt_option.push("-y");
+            }
+            let mut cmd = std::process::Command::new("apt-get")
+                .arg("install")
+                .arg("--reinstall")
+                .args(apt_option)
+                .arg("-d")
+                .args(packages)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to execute process");
+            let status = cmd.wait().expect("failed to wait on child");
+            if status.success() {
+                fs::read_dir("/tmp/apt/cache/archives")
+                    .expect("read dir")
                     .for_each(|entry| {
-                        let entry = entry.unwrap();
+                        let entry = entry.expect("entry to exist");
                         let path = entry.path();
-                        if !path.ends_with("dkpg") {
-                            return;
+                        match path.extension() {
+                            Some(ext) if ext == "deb" => {}
+                            _ => return,
                         }
-                        let mut cmd = std::process::Command::new("dpkg");
-                        cmd.arg("-x");
-                        cmd.arg(path);
-                        cmd.arg(home.clone());
-                        let output = cmd.output().expect("failed to execute process");
-                        io::stdout().write_all(&output.stdout).unwrap();
-                        io::stderr().write_all(&output.stderr).unwrap();
+                        let mut cmd = std::process::Command::new("dpkg")
+                            .arg("-x")
+                            .arg(path)
+                            .arg(home.clone())
+                            .stdout(Stdio::inherit())
+                            .stderr(Stdio::inherit())
+                            .spawn()
+                            .expect("failed to execute process");
+                        cmd.wait().expect("failed to wait on child");
                     });
             }
+            exit(status.code().unwrap_or(1))
         }
         Command::Update => {
-            let mut cmd = std::process::Command::new("apt-get");
-            cmd.arg("update");
-            cmd.args(apt_option);
-            let output = cmd.output().expect("failed to execute process");
-            io::stdout().write_all(&output.stdout).unwrap();
-            io::stderr().write_all(&output.stderr).unwrap();
+            let mut cmd = std::process::Command::new("apt-get")
+                .arg("update")
+                .args(apt_option)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("failed to execute process");
+            let status = cmd.wait().expect("failed to wait on child");
+            exit(status.code().unwrap_or(1))
         }
     }
 }
